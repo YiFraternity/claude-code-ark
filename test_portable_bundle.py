@@ -20,12 +20,24 @@ MODELHUB_PROXY = BUNDLE_DIR / "modelhub_compat_proxy.py"
 REGISTRY = BUNDLE_DIR / "claude_ark_registry.py"
 SELECTOR = BUNDLE_DIR / "claude_ark_model_selector.py"
 MODEL_TEMPLATE = BUNDLE_DIR / "ak_map_available.example.json"
+BOTMUX_TEMPLATE = BUNDLE_DIR / "botmux.example.json"
 README = BUNDLE_DIR / "README.md"
 
 
 class ClaudeArkPortableBundleTests(unittest.TestCase):
     def test_bundle_contains_all_install_time_assets(self) -> None:
-        required = (LAUNCHER, INSTALLER, PACKAGER, ARK_PROXY, MODELHUB_PROXY, REGISTRY, SELECTOR, MODEL_TEMPLATE, README)
+        required = (
+            LAUNCHER,
+            INSTALLER,
+            PACKAGER,
+            ARK_PROXY,
+            MODELHUB_PROXY,
+            REGISTRY,
+            SELECTOR,
+            MODEL_TEMPLATE,
+            BOTMUX_TEMPLATE,
+            README,
+        )
         self.assertEqual([], [str(path) for path in required if not path.is_file()])
         for shell_script in (LAUNCHER, INSTALLER, PACKAGER):
             subprocess.run(["bash", "-n", str(shell_script)], check=True)
@@ -34,6 +46,15 @@ class ClaudeArkPortableBundleTests(unittest.TestCase):
         template = json.loads(MODEL_TEMPLATE.read_text(encoding="utf-8"))
         self.assertEqual(12, len(template))
         self.assertTrue(all(route["api_keys"] == [""] for route in template.values()))
+
+    def test_botmux_template_routes_claude_code_through_claude_ark_without_credentials(self) -> None:
+        template = json.loads(BOTMUX_TEMPLATE.read_text(encoding="utf-8"))
+        self.assertEqual("claude-code", template["cliId"])
+        self.assertEqual("claude-ark", template["wrapperCli"])
+        self.assertEqual("claude-ark", template["agentSelectionKey"])
+        self.assertTrue(template["disableCliBypass"])
+        self.assertEqual("<LARK_APP_ID>", template["larkAppId"])
+        self.assertEqual("<LARK_APP_SECRET>", template["larkAppSecret"])
 
     def test_launcher_is_not_bound_to_a_specific_machine(self) -> None:
         launcher = LAUNCHER.read_text(encoding="utf-8")
@@ -58,6 +79,7 @@ class ClaudeArkPortableBundleTests(unittest.TestCase):
                 "claude-ark/claude_ark_registry.py",
                 "claude-ark/claude_ark_model_selector.py",
                 "claude-ark/ak_map_available.example.json",
+                "claude-ark/botmux.example.json",
                 "claude-ark/README.md",
             },
             names,

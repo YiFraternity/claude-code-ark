@@ -30,6 +30,24 @@ choose another configured model, or `claude-ark --model <name>` for one launch.
 For VS Code, configure the Claude Code extension's process wrapper to use the
 installed `claude-ark` command, then start a new Claude session.
 
+## Botmux
+
+Use `botmux.example.json` as a field reference when adding a Botmux robot. It
+keeps Botmux on the `claude-code` adapter while making `claude-ark` the launch
+wrapper. Replace every angle-bracket placeholder locally; the example must
+remain credential-free.
+
+For an existing Botmux robot, set only the adapter and wrapper fields, then
+restart Botmux:
+
+```bash
+botmux setup edit <process-name-or-app-id> --cli claude-code --wrapper-cli claude-ark
+botmux restart
+```
+
+Existing Claude sessions retain their current process. Start a new topic after
+the restart to use the `claude-ark` wrapper.
+
 ## Build a standalone archive
 
 ```bash

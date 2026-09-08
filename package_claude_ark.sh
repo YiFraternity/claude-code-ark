@@ -14,6 +14,7 @@ files=(
   claude_ark_registry.py
   claude_ark_model_selector.py
   ak_map_available.example.json
+  botmux.example.json
   README.md
 )
 

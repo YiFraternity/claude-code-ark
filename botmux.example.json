@@ -1,0 +1,13 @@
+{
+  "processName": "botmux-claude-ark",
+  "larkAppId": "<LARK_APP_ID>",
+  "larkAppSecret": "<LARK_APP_SECRET>",
+  "cliId": "claude-code",
+  "defaultWorkingDir": "<PROJECT_DIRECTORY>",
+  "allowedUsers": [
+    "<ALLOWED_USER>"
+  ],
+  "wrapperCli": "claude-ark",
+  "agentSelectionKey": "claude-ark",
+  "disableCliBypass": true
+}
