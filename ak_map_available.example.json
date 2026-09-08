@@ -1,0 +1,89 @@
+{
+  "Doubao-1.5-pro-32k": {
+    "provider": "modelhub",
+    "base_url": "https://aidp.bytedance.net/api/modelhub/online/v2/crawl",
+    "api_keys": [
+      ""
+    ]
+  },
+  "gemini-2.5-pro": {
+    "provider": "modelhub",
+    "base_url": "https://aidp.bytedance.net/api/modelhub/online/v2/crawl",
+    "api_keys": [
+      ""
+    ]
+  },
+  "gpt-4o-2024-11-20": {
+    "provider": "modelhub",
+    "base_url": "https://aidp.bytedance.net/api/modelhub/online/v2/crawl",
+    "api_keys": [
+      ""
+    ]
+  },
+  "gpt-5.4-2026-03-05": {
+    "provider": "modelhub",
+    "base_url": "https://aidp.bytedance.net/api/modelhub/online/v2/crawl",
+    "api_keys": [
+      ""
+    ]
+  },
+  "gpt-4o-mini-2024-07-18": {
+    "provider": "modelhub",
+    "base_url": "https://aidp.bytedance.net/api/modelhub/online/v2/crawl",
+    "api_keys": [
+      ""
+    ]
+  },
+  "gemini-3.1-p": {
+    "provider": "modelhub",
+    "base_url": "https://aidp.bytedance.net/api/modelhub/online/v2/crawl",
+    "api_keys": [
+      ""
+    ]
+  },
+  "Doubao-Seed-1.6-thinking": {
+    "provider": "modelhub",
+    "base_url": "https://aidp.bytedance.net/api/modelhub/online/v2/crawl",
+    "api_keys": [
+      ""
+    ]
+  },
+  "gpt-5.5-2026-04-24": {
+    "provider": "modelhub",
+    "base_url": "https://aidp.bytedance.net/api/modelhub/online/v2/crawl",
+    "api_keys": [
+      ""
+    ]
+  },
+  "Ark-deepseek-v3.1-0821": {
+    "provider": "modelhub",
+    "base_url": "https://aidp.bytedance.net/api/modelhub/online/v2/crawl",
+    "api_keys": [
+      ""
+    ]
+  },
+  "doubao-seed-2.0-lite": {
+    "provider": "ark_responses",
+    "base_url": "https://ark-cn-beijing.bytedance.net/api/v3",
+    "endpoint_id": "ep-20260903173408-glx79",
+    "api_keys": [
+      ""
+    ]
+  },
+  "doubao-seed-2.0-turbo": {
+    "provider": "ark_chat_completions",
+    "base_url": "https://ark-cn-beijing.bytedance.net/api/v3",
+    "endpoint_id": "ep-20260904115250-bjt24",
+    "api_keys": [
+      ""
+    ]
+  },
+  "doubao-seed-2.0-pro": {
+    "provider": "ark_chat_completions",
+    "base_url": "https://ark-cn-beijing.bytedance.net/api/v3",
+    "endpoint_id": "ep-20260513195651-wrtdc",
+    "api_keys": [
+      ""
+    ]
+  }
+}

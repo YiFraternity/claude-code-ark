@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+# Portable launcher for Claude Code through the local Ark / ModelHub gateway.
+set -euo pipefail
+
+bundle_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+config_root="${XDG_CONFIG_HOME:-$HOME/.config}"
+gateway_config_dir="${CLAUDE_ARK_CONFIG_DIR:-$config_root/claude-ark}"
+gateway_state_dir="${CLAUDE_ARK_STATE_DIR:-$gateway_config_dir}"
+gateway_secrets="$gateway_config_dir/.env"
+model_map="${CLAUDE_ARK_MODEL_MAP:-$gateway_config_dir/ak_map_available.json}"
+registry_binary="$bundle_dir/claude_ark_registry.py"
+selector_binary="$bundle_dir/claude_ark_model_selector.py"
+ark_compatibility_binary="$bundle_dir/ark_compat_proxy.py"
+modelhub_compatibility_binary="$bundle_dir/modelhub_compat_proxy.py"
+gateway_port="${CLAUDE_ARK_PORT:-40127}"
+gateway_url="http://127.0.0.1:$gateway_port"
+gateway_pid_file="$gateway_state_dir/litellm-$gateway_port.pid"
+gateway_log_file="$gateway_state_dir/litellm-$gateway_port.log"
+gateway_runtime_config="$gateway_state_dir/litellm-$gateway_port.yaml"
+gateway_routes_file="$gateway_state_dir/litellm-$gateway_port.routes"
+ark_compatibility_port="${CLAUDE_ARK_COMPAT_PORT:-40129}"
+ark_compatibility_url="http://127.0.0.1:$ark_compatibility_port"
+ark_compatibility_pid_file="$gateway_state_dir/ark-compat-$ark_compatibility_port.pid"
+ark_compatibility_log_file="$gateway_state_dir/ark-compat-$ark_compatibility_port.log"
+modelhub_compatibility_port="${CLAUDE_ARK_MODELHUB_PORT:-40130}"
+modelhub_compatibility_url="http://127.0.0.1:$modelhub_compatibility_port"
+modelhub_compatibility_pid_file="$gateway_state_dir/modelhub-compat-$modelhub_compatibility_port.pid"
+modelhub_compatibility_log_file="$gateway_state_dir/modelhub-compat-$modelhub_compatibility_port.log"
+ark_base_url="https://ark-cn-beijing.bytedance.net/api/v3"
+default_model="gpt-5.5-2026-04-24"
+selected_model="${ANTHROPIC_MODEL:-}"
+show_model_picker=0
+claude_args=()
+vscode_claude_binary=""
+
+if [[ -n "${CLAUDE_ARK_PYTHON:-}" ]]; then
+  conda_python="$CLAUDE_ARK_PYTHON"
+elif command -v python3 >/dev/null 2>&1; then
+  conda_python="$(command -v python3)"
+elif command -v python >/dev/null 2>&1; then
+  conda_python="$(command -v python)"
+else
+  printf 'claude-ark: Python 3 is required; set CLAUDE_ARK_PYTHON if it is not on PATH\n' >&2
+  exit 1
+fi
+
+if [[ -n "${CLAUDE_ARK_LITELLM_BIN:-}" ]]; then
+  gateway_binary="$CLAUDE_ARK_LITELLM_BIN"
+elif command -v litellm >/dev/null 2>&1; then
+  gateway_binary="$(command -v litellm)"
+else
+  printf 'claude-ark: LiteLLM is required; run install_claude_ark.sh with the intended Python environment\n' >&2
+  exit 1
+fi
+
+# Claude Code for VS Code invokes a process wrapper as:
+# wrapper <bundled-claude-binary> <normal Claude CLI arguments...>
+if [[ "${CLAUDE_CODE_ENTRYPOINT:-}" == "claude-vscode" ]] && [[ "$#" -gt 0 ]] && [[ -f "$1" ]] && [[ -x "$1" ]]; then
+  vscode_claude_binary="$1"
+  shift
+fi
+
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --select-model)
+      show_model_picker=1
+      shift
+      ;;
+    --model)
+      if [[ "$#" -lt 2 ]]; then
+        printf 'claude-ark: --model requires a configured model name\n' >&2
+        exit 2
+      fi
+      selected_model="$2"
+      shift 2
+      ;;
+    --model=*)
+      selected_model="${1#--model=}"
+      shift
+      ;;
+    *)
+      claude_args+=("$1")
+      shift
+      ;;
+  esac
+done
+
+mkdir -p "$gateway_config_dir" "$gateway_state_dir"
+chmod 700 "$gateway_config_dir" "$gateway_state_dir"
+if [[ ! -e "$gateway_secrets" ]]; then
+  (umask 077; : > "$gateway_secrets")
+fi
+
+for required in "$gateway_secrets" "$gateway_binary" "$conda_python" "$model_map" "$registry_binary" "$selector_binary" "$ark_compatibility_binary" "$modelhub_compatibility_binary"; do
+  if [[ ! -e "$required" ]]; then
+    if [[ "$required" == "$model_map" ]]; then
+      printf 'claude-ark: model map is missing; run install_claude_ark.sh, then fill its local model configuration\n' >&2
+    else
+      printf 'claude-ark: required file is missing: %s\n' "$required" >&2
+    fi
+    exit 1
+  fi
+done
+
+set -a
+# shellcheck source=/dev/null
+source "$gateway_secrets"
+set +a
+# Keys are loaded from the local model map only by LiteLLM and ModelHub proxy.
+unset ARK_API_KEY
+
+if [[ -z "${LITELLM_MASTER_KEY:-}" ]]; then
+  LITELLM_MASTER_KEY="sk-$(openssl rand -hex 32)"
+  export LITELLM_MASTER_KEY
+  (umask 077; printf '\nLITELLM_MASTER_KEY=%s\n' "$LITELLM_MASTER_KEY" >> "$gateway_secrets")
+fi
+
+if [[ -z "$selected_model" ]]; then
+  if [[ "$show_model_picker" -eq 1 ]] || { [[ "${#claude_args[@]}" -eq 0 ]] && [[ -t 0 ]] && [[ -t 2 ]]; }; then
+    selected_model="$("$conda_python" "$selector_binary" --map "$model_map" --default "$default_model")"
+  fi
+fi
+
+selected_model="${selected_model:-$default_model}"
+if ! "$conda_python" "$registry_binary" contains --map "$model_map" --model "$selected_model"; then
+  printf 'claude-ark: selected model is not configured: %s\n' "$selected_model" >&2
+  exit 2
+fi
+
+gateway_is_live() {
+  curl --fail --silent --max-time 1 "$gateway_url/health/liveliness" >/dev/null 2>&1
+}
+
+gateway_routes_match() {
+  [[ -f "$gateway_routes_file" ]] && "$conda_python" "$registry_binary" list --map "$model_map" | cmp -s - "$gateway_routes_file"
+}
+
+stop_owned_gateway() {
+  if [[ ! -r "$gateway_pid_file" ]]; then
+    return 1
+  fi
+  read -r gateway_pid < "$gateway_pid_file"
+  if [[ ! "$gateway_pid" =~ ^[0-9]+$ ]] || ! ps -p "$gateway_pid" -o args= 2>/dev/null | grep -q '[l]itellm'; then
+    return 1
+  fi
+  kill -TERM "$gateway_pid"
+  for _ in {1..100}; do
+    if ! gateway_is_live; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
+ark_compatibility_is_live() {
+  curl --fail --silent --max-time 1 "$ark_compatibility_url/health/liveliness" >/dev/null 2>&1
+}
+
+modelhub_compatibility_is_live() {
+  curl --fail --silent --max-time 1 "$modelhub_compatibility_url/health/liveliness" >/dev/null 2>&1
+}
+
+if ! ark_compatibility_is_live; then
+  env -u DEBUG "$conda_python" "$ark_compatibility_binary" --host 127.0.0.1 --port "$ark_compatibility_port" --upstream-base-url "$ark_base_url" >"$ark_compatibility_log_file" 2>&1 &
+  ark_compatibility_pid=$!
+  printf '%s\n' "$ark_compatibility_pid" > "$ark_compatibility_pid_file"
+  for _ in {1..100}; do
+    ark_compatibility_is_live && break
+    sleep 0.1
+  done
+  if ! ark_compatibility_is_live; then
+    printf 'claude-ark: Ark compatibility proxy did not start; inspect %s\n' "$ark_compatibility_log_file" >&2
+    exit 1
+  fi
+fi
+
+if ! modelhub_compatibility_is_live; then
+  env -u DEBUG "$conda_python" "$modelhub_compatibility_binary" --host 127.0.0.1 --port "$modelhub_compatibility_port" --map "$model_map" >"$modelhub_compatibility_log_file" 2>&1 &
+  modelhub_compatibility_pid=$!
+  printf '%s\n' "$modelhub_compatibility_pid" > "$modelhub_compatibility_pid_file"
+  for _ in {1..100}; do
+    modelhub_compatibility_is_live && break
+    sleep 0.1
+  done
+  if ! modelhub_compatibility_is_live; then
+    printf 'claude-ark: ModelHub compatibility proxy did not start; inspect %s\n' "$modelhub_compatibility_log_file" >&2
+    exit 1
+  fi
+fi
+
+if gateway_is_live && ! gateway_routes_match; then
+  printf 'claude-ark: refreshing the local gateway for the current model map\n' >&2
+  if ! stop_owned_gateway; then
+    printf 'claude-ark: current local gateway is not an owned LiteLLM process; choose another CLAUDE_ARK_PORT or stop it first\n' >&2
+    exit 1
+  fi
+fi
+
+if ! gateway_is_live; then
+  env -u DEBUG LITELLM_LOG=ERROR "$conda_python" "$registry_binary" run-litellm --map "$model_map" --config "$gateway_runtime_config" --ark-compat-base-url "$ark_compatibility_url" --modelhub-compat-base-url "$modelhub_compatibility_url" --litellm-binary "$gateway_binary" --host 127.0.0.1 --port "$gateway_port" >"$gateway_log_file" 2>&1 &
+  gateway_pid=$!
+  printf '%s\n' "$gateway_pid" > "$gateway_pid_file"
+  for _ in {1..100}; do
+    gateway_is_live && break
+    sleep 0.1
+  done
+  if ! gateway_is_live; then
+    printf 'claude-ark: LiteLLM did not start; inspect %s\n' "$gateway_log_file" >&2
+    exit 1
+  fi
+  "$conda_python" "$registry_binary" list --map "$model_map" > "$gateway_routes_file"
+  chmod 600 "$gateway_routes_file"
+fi
+
+export ANTHROPIC_BASE_URL="$gateway_url"
+export ANTHROPIC_AUTH_TOKEN="$LITELLM_MASTER_KEY"
+unset ANTHROPIC_API_KEY
+export ANTHROPIC_MODEL="$selected_model"
+export ANTHROPIC_SMALL_FAST_MODEL="${ANTHROPIC_SMALL_FAST_MODEL:-$ANTHROPIC_MODEL}"
+export CLAUDE_CODE_SUBAGENT_MODEL="$ANTHROPIC_MODEL"
+export CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1
+export CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT="${CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT:-1}"
+
+if [[ -n "$vscode_claude_binary" ]]; then
+  claude_binary="$vscode_claude_binary"
+elif [[ -n "${CLAUDE_BIN:-}" ]]; then
+  claude_binary="$CLAUDE_BIN"
+elif command -v claude >/dev/null 2>&1; then
+  claude_binary="$(command -v claude)"
+else
+  printf 'claude-ark: Claude Code CLI is required; set CLAUDE_BIN if it is not on PATH\n' >&2
+  exit 1
+fi
+exec "$claude_binary" "${claude_args[@]}"

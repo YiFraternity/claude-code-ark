@@ -1,0 +1,7 @@
+# Provider credentials must stay only in user-local configuration.
+ak_map_available.json
+.env
+
+# Generated release archive and Python cache.
+claude-ark-portable.tar.gz
+__pycache__/
