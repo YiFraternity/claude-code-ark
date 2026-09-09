@@ -30,6 +30,13 @@ choose another configured model, or `claude-ark --model <name>` for one launch.
 For VS Code, configure the Claude Code extension's process wrapper to use the
 installed `claude-ark` command, then start a new Claude session.
 
+## ModelHub tool compatibility
+
+The ModelHub proxy preserves Claude Code tool calls and tool results. It also
+removes `pattern` constraints only from tool parameter schemas: Claude Code's
+`Artifact` tool contains a Unicode regex that ModelHub cannot parse. Types,
+required fields, and all other tool structure are retained.
+
 ## Botmux
 
 Use `botmux.example.json` as a field reference when adding a Botmux robot. It

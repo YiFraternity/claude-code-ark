@@ -37,8 +37,22 @@ def load_modelhub_routes(map_path: Path) -> dict[str, ModelHubRoute]:
     return routes
 
 
+def strip_modelhub_unsupported_schema_patterns(schema: object) -> None:
+    """Remove regex constraints ModelHub cannot parse from one tool JSON Schema."""
+    if isinstance(schema, dict):
+        # Claude Code's Artifact tool uses ECMAScript Unicode-property syntax
+        # (for example ``\\p{Cc}``). ModelHub validates it as a different regex
+        # dialect and rejects the complete request before model execution.
+        schema.pop("pattern", None)
+        for value in schema.values():
+            strip_modelhub_unsupported_schema_patterns(value)
+    elif isinstance(schema, list):
+        for value in schema:
+            strip_modelhub_unsupported_schema_patterns(value)
+
+
 def normalize_modelhub_tool_schemas(payload: dict[str, object]) -> None:
-    """Make Claude Code's unconstrained Workflow.args schema acceptable to ModelHub."""
+    """Normalize Claude Code tool schemas without changing their tool protocol."""
     tools = payload.get("tools")
     if not isinstance(tools, list):
         return
@@ -46,10 +60,13 @@ def normalize_modelhub_tool_schemas(payload: dict[str, object]) -> None:
         if not isinstance(tool, dict):
             continue
         function = tool.get("function")
-        if not isinstance(function, dict) or function.get("name") != "Workflow":
+        if not isinstance(function, dict):
             continue
         parameters = function.get("parameters")
         if not isinstance(parameters, dict):
+            continue
+        strip_modelhub_unsupported_schema_patterns(parameters)
+        if function.get("name") != "Workflow":
             continue
         properties = parameters.get("properties")
         if not isinstance(properties, dict):

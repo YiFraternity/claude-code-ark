@@ -61,6 +61,46 @@ class ClaudeArkPortableBundleTests(unittest.TestCase):
         self.assertEqual(12, len(template))
         self.assertTrue(all(route["api_keys"] == [""] for route in template.values()))
 
+    def test_modelhub_schema_normalizer_removes_incompatible_patterns(self) -> None:
+        from modelhub_compat_proxy import normalize_modelhub_tool_schemas
+
+        payload = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "Artifact",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "path": {
+                                    "type": "string",
+                                    "pattern": "^(?!__.*__$)[^\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}\"\\\\./[\\]]{1,200}$",
+                                },
+                                "metadata": {
+                                    "type": "object",
+                                    "properties": {
+                                        "kind": {"type": "string", "pattern": "^[a-z]+$"}
+                                    },
+                                },
+                            },
+                            "required": ["path"],
+                            "additionalProperties": False,
+                        },
+                    },
+                }
+            ]
+        }
+
+        normalize_modelhub_tool_schemas(payload)
+
+        parameters = payload["tools"][0]["function"]["parameters"]
+        self.assertNotIn("pattern", parameters["properties"]["path"])
+        self.assertNotIn("pattern", parameters["properties"]["metadata"]["properties"]["kind"])
+        self.assertEqual("string", parameters["properties"]["path"]["type"])
+        self.assertEqual(["path"], parameters["required"])
+        self.assertFalse(parameters["additionalProperties"])
+
     def test_botmux_template_routes_claude_code_through_claude_ark_without_credentials(self) -> None:
         template = json.loads(BOTMUX_TEMPLATE.read_text(encoding="utf-8"))
         self.assertEqual("claude-code", template["cliId"])
