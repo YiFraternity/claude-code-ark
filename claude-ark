@@ -2,7 +2,8 @@
 # Portable launcher for Claude Code through the local Ark / ModelHub gateway.
 set -euo pipefail
 
-bundle_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+launcher_path="$(readlink -f -- "${BASH_SOURCE[0]}")"
+bundle_dir="$(cd -- "$(dirname -- "$launcher_path")" && pwd)"
 config_root="${XDG_CONFIG_HOME:-$HOME/.config}"
 gateway_config_dir="${CLAUDE_ARK_CONFIG_DIR:-$config_root/claude-ark}"
 gateway_state_dir="${CLAUDE_ARK_STATE_DIR:-$gateway_config_dir}"
