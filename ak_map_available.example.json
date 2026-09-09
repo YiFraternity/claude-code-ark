@@ -41,6 +41,13 @@
       ""
     ]
   },
+  "gemini-3.8-flash": {
+    "provider": "modelhub",
+    "base_url": "https://aidp.bytedance.net/api/modelhub/online/v2/crawl",
+    "api_keys": [
+      ""
+    ]
+  },
   "Doubao-Seed-1.6-thinking": {
     "provider": "modelhub",
     "base_url": "https://aidp.bytedance.net/api/modelhub/online/v2/crawl",

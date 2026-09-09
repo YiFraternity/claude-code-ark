@@ -13,7 +13,9 @@ import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 from pathlib import Path
+from urllib.error import HTTPError
 
 
 BUNDLE_DIR = Path(__file__).parent
@@ -58,7 +60,8 @@ class ClaudeArkPortableBundleTests(unittest.TestCase):
 
     def test_model_template_has_no_provider_key(self) -> None:
         template = json.loads(MODEL_TEMPLATE.read_text(encoding="utf-8"))
-        self.assertEqual(12, len(template))
+        self.assertEqual(13, len(template))
+        self.assertIn("gemini-3.8-flash", template)
         self.assertTrue(all(route["api_keys"] == [""] for route in template.values()))
 
     def test_modelhub_schema_normalizer_removes_incompatible_patterns(self) -> None:
@@ -182,6 +185,446 @@ class ClaudeArkPortableBundleTests(unittest.TestCase):
                 for server in servers:
                     server.shutdown()
                     server.server_close()
+
+    def test_launcher_resolves_bundle_when_invoked_through_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temporary = Path(tmpdir)
+            launcher_link = temporary / "claude-ark"
+            launcher_link.symlink_to(LAUNCHER)
+            model_map = temporary / "models.json"
+            model_map.write_text(
+                json.dumps(
+                    {
+                        "configured-model": {
+                            "provider": "modelhub",
+                            "base_url": "https://example.invalid/chat/completions",
+                            "api_keys": ["test-secret"],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [str(launcher_link), "--model", "missing-model"],
+                check=False,
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "CLAUDE_ARK_CONFIG_DIR": str(temporary / "config"),
+                    "CLAUDE_ARK_LITELLM_BIN": "/bin/true",
+                    "CLAUDE_ARK_MODEL_MAP": str(model_map),
+                    "CLAUDE_ARK_PYTHON": sys.executable,
+                },
+            )
+
+        self.assertEqual(completed.returncode, 2, completed.stderr)
+        self.assertIn(
+            "selected model is not configured: missing-model",
+            completed.stderr,
+        )
+
+    def test_plain_launch_uses_a_configured_default_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temporary = Path(tmpdir)
+            fake_bin = temporary / "bin"
+            fake_bin.mkdir()
+            fake_curl = fake_bin / "curl"
+            fake_curl.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            fake_curl.chmod(0o700)
+            fake_claude = fake_bin / "claude"
+            fake_claude.write_text(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$ANTHROPIC_MODEL\"\n",
+                encoding="utf-8",
+            )
+            fake_claude.chmod(0o700)
+            model_map = temporary / "models.json"
+            model_config = json.loads(MODEL_TEMPLATE.read_text(encoding="utf-8"))
+            for route in model_config.values():
+                route["api_keys"] = ["test-secret"]
+            model_map.write_text(json.dumps(model_config), encoding="utf-8")
+            with (temporary / "litellm-40127.routes").open("w", encoding="utf-8") as routes:
+                subprocess.run(
+                    [sys.executable, str(REGISTRY), "list", "--map", str(model_map)],
+                    check=True,
+                    stdout=routes,
+                )
+            completed = subprocess.run(
+                [str(LAUNCHER)],
+                check=False,
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                    "CLAUDE_ARK_CONFIG_DIR": str(temporary),
+                    "CLAUDE_ARK_LITELLM_BIN": "/bin/true",
+                    "CLAUDE_ARK_MODEL_MAP": str(model_map),
+                    "CLAUDE_ARK_PYTHON": sys.executable,
+                    "CLAUDE_BIN": str(fake_claude),
+                },
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout, "gemini-3.8-flash\n")
+
+    def test_modelhub_nonstream_tool_calls_receive_ids_and_tool_finish_reason(self) -> None:
+        from modelhub_compat_proxy import normalize_modelhub_response
+
+        upstream_response = {
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "",
+                                "type": "function",
+                                "function": {
+                                    "name": "echo_value",
+                                    "arguments": '{"value":"ok"}',
+                                },
+                            }
+                        ],
+                    },
+                }
+            ]
+        }
+
+        normalized = json.loads(
+            normalize_modelhub_response(
+                json.dumps(upstream_response).encode("utf-8"),
+                "application/json; charset=utf-8",
+            )
+        )
+
+        choice = normalized["choices"][0]
+        self.assertEqual("tool_calls", choice["finish_reason"])
+        self.assertRegex(choice["message"]["tool_calls"][0]["id"], r"^call_[0-9a-f]{32}$")
+
+    def test_modelhub_stream_tool_calls_reuse_ids_and_finish_as_tool_calls(self) -> None:
+        from modelhub_compat_proxy import normalize_modelhub_response, restore_modelhub_tool_signatures
+
+        events = [
+            {
+                "id": "response-1",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "",
+                                    "type": "function",
+                                    "function": {"name": "echo_value", "arguments": "{\"value\":"},
+                                }
+                            ],
+                        },
+                    }
+                ],
+            },
+            {
+                "id": "response-1",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {"arguments": "\"ok\"}"},
+                                    "signature": "signed-stream-state",
+                                }
+                            ]
+                        },
+                    }
+                ],
+            },
+            {
+                "id": "response-1",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "late-conflicting-id",
+                                    "function": {"arguments": ""},
+                                }
+                            ]
+                        },
+                    }
+                ],
+            },
+            {
+                "id": "response-1",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        ]
+        tool_signatures: dict[str, str] = {}
+        body = "".join(
+            [*(f"data: {json.dumps(event)}\n\n" for event in events), "data: [DONE]\n\n"]
+        ).encode("utf-8")
+
+        normalized_body = normalize_modelhub_response(body, "text/event-stream", tool_signatures)
+        normalized_events = [
+            json.loads(line.removeprefix("data: "))
+            for line in normalized_body.decode("utf-8").splitlines()
+            if line.startswith("data: {")
+        ]
+
+        first_id = normalized_events[0]["choices"][0]["delta"]["tool_calls"][0]["id"]
+        late_id = normalized_events[2]["choices"][0]["delta"]["tool_calls"][0]["id"]
+        self.assertRegex(first_id, r"^call_[0-9a-f]{32}$")
+        self.assertNotIn("id", normalized_events[1]["choices"][0]["delta"]["tool_calls"][0])
+        self.assertEqual(first_id, late_id)
+        self.assertEqual("tool_calls", normalized_events[3]["choices"][0]["finish_reason"])
+        followup_request = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": first_id,
+                            "type": "function",
+                            "function": {"name": "echo_value", "arguments": '{"value":"ok"}'},
+                        }
+                    ],
+                }
+            ]
+        }
+        restore_modelhub_tool_signatures(followup_request, tool_signatures)
+        self.assertEqual(
+            "signed-stream-state",
+            followup_request["messages"][0]["tool_calls"][0]["signature"],
+        )
+        self.assertTrue(normalized_body.endswith(b"data: [DONE]\n\n"))
+
+    def test_modelhub_tool_signatures_are_restored_on_the_followup_request(self) -> None:
+        from modelhub_compat_proxy import normalize_modelhub_response, restore_modelhub_tool_signatures
+
+        tool_signatures: dict[str, str] = {}
+        upstream_response = {
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "",
+                                "type": "function",
+                                "function": {
+                                    "name": "echo_value",
+                                    "arguments": '{"value":"ok"}',
+                                },
+                                "signature": "signed-model-state",
+                            }
+                        ],
+                    },
+                }
+            ]
+        }
+        normalized = json.loads(
+            normalize_modelhub_response(
+                json.dumps(upstream_response).encode("utf-8"),
+                "application/json",
+                tool_signatures,
+            )
+        )
+        call_id = normalized["choices"][0]["message"]["tool_calls"][0]["id"]
+        followup_request = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": "echo_value",
+                                "arguments": '{"value":"ok"}',
+                            },
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": call_id, "content": "ok"},
+            ]
+        }
+
+        restore_modelhub_tool_signatures(followup_request, tool_signatures)
+
+        restored_call = followup_request["messages"][0]["tool_calls"][0]
+        self.assertEqual("signed-model-state", restored_call["signature"])
+        self.assertNotIn("signature", followup_request["messages"][0])
+
+    def test_modelhub_text_responses_are_not_rewritten(self) -> None:
+        from modelhub_compat_proxy import normalize_modelhub_response
+
+        upstream_response = {
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "hello"},
+                }
+            ]
+        }
+        body = json.dumps(upstream_response, separators=(",", ":")).encode("utf-8")
+
+        normalized = normalize_modelhub_response(body, "application/json")
+
+        self.assertEqual(body, normalized)
+
+    def test_modelhub_tool_normalization_removes_schema_dialect_markers(self) -> None:
+        from modelhub_compat_proxy import normalize_modelhub_tool_schemas
+
+        payload = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "Read",
+                        "parameters": {
+                            "$schema": "https://json-schema.org/draft/2020-12/schema",
+                            "type": "object",
+                            "properties": {
+                                "path": {
+                                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                                    "type": "string",
+                                }
+                            },
+                        },
+                    },
+                }
+            ]
+        }
+
+        normalize_modelhub_tool_schemas(payload)
+
+        parameters = payload["tools"][0]["function"]["parameters"]
+        self.assertNotIn("$schema", parameters)
+        self.assertNotIn("$schema", parameters["properties"]["path"])
+        self.assertEqual(parameters["properties"]["path"]["type"], "string")
+
+    def test_modelhub_tool_normalization_converts_unsupported_constraints(self) -> None:
+        from modelhub_compat_proxy import normalize_modelhub_tool_schemas
+
+        payload = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "Edit",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "mode": {"const": "safe"},
+                                "count": {
+                                    "type": "integer",
+                                    "exclusiveMinimum": 0,
+                                },
+                                "values": {
+                                    "type": "object",
+                                    "propertyNames": {"type": "string"},
+                                },
+                            },
+                        },
+                    },
+                }
+            ]
+        }
+
+        normalize_modelhub_tool_schemas(payload)
+
+        properties = payload["tools"][0]["function"]["parameters"]["properties"]
+        self.assertEqual(properties["mode"], {"enum": ["safe"]})
+        self.assertEqual(properties["count"], {"type": "integer"})
+        self.assertEqual(properties["values"], {"type": "object"})
+
+    def test_modelhub_tool_normalization_adds_items_to_tuple_arrays(self) -> None:
+        from modelhub_compat_proxy import normalize_modelhub_tool_schemas
+
+        prefix_items = [
+            {"type": "string"},
+            {"type": "string", "enum": ["eq", "ne", "in"]},
+            {},
+        ]
+        payload = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "ToolSearch",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "object",
+                                    "properties": {
+                                        "where": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "array",
+                                                "prefixItems": prefix_items,
+                                            },
+                                        }
+                                    },
+                                }
+                            },
+                        },
+                    },
+                }
+            ]
+        }
+
+        normalize_modelhub_tool_schemas(payload)
+
+        inner_array = payload["tools"][0]["function"]["parameters"]["properties"]["query"]["properties"]["where"]["items"]
+        self.assertIn("items", inner_array, "ModelHub requires items on every array schema")
+        self.assertEqual({}, inner_array["items"])
+        self.assertEqual(prefix_items, inner_array["prefixItems"])
+
+    def test_modelhub_http_errors_preserve_the_upstream_response_body(self) -> None:
+        import modelhub_compat_proxy
+
+        self.assertTrue(
+            hasattr(modelhub_compat_proxy, "modelhub_http_error_response"),
+            "ModelHub HTTP error responses must preserve upstream diagnostics",
+        )
+        modelhub_http_error_response = modelhub_compat_proxy.modelhub_http_error_response
+
+        upstream_body = b'{"error":{"message":"unsupported tool schema keyword"}}'
+        error = HTTPError(
+            url="https://modelhub.example/chat/completions",
+            code=400,
+            msg="Bad Request",
+            hdrs={"Content-Type": "application/json; charset=utf-8"},
+            fp=BytesIO(upstream_body),
+        )
+
+        with error:
+            body, content_type = modelhub_http_error_response(error)
+
+        self.assertEqual(upstream_body, body)
+        self.assertEqual("application/json; charset=utf-8", content_type)
 
     def test_packager_emits_only_the_safe_whitelist(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
